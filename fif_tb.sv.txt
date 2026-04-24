@@ -1,0 +1,194 @@
+// FIFO Constrained Random Testbench
+// Features: Rand stimulus, Functional Coverage, SVA Assertions, Scoreboard
+
+// Transaction Class
+class fifo_transaction;
+    rand logic        wr_en;
+    rand logic        rd_en;
+    rand logic [7:0]  din;
+
+    // Constrained random — bias toward write and read operations
+    constraint valid_ops {
+        !(wr_en == 0 && rd_en == 0); // always do something
+    }
+
+    constraint data_range {
+        din inside {[0:255]};
+    }
+endclass
+
+// Coverage Class
+class fifo_coverage;
+    logic full, empty;
+    logic wr_en, rd_en;
+
+    covergroup fifo_cg;
+        cp_full:  coverpoint full  { bins full_true  = {1}; bins full_false  = {0}; }
+        cp_empty: coverpoint empty { bins empty_true = {1}; bins empty_false = {0}; }
+        cp_wr:    coverpoint wr_en { bins write = {1}; bins no_write = {0}; }
+        cp_rd:    coverpoint rd_en { bins read  = {1}; bins no_read  = {0}; }
+
+        // Cross coverage — write when full, read when empty
+        cx_wr_full:  cross cp_wr, cp_full;
+        cx_rd_empty: cross cp_rd, cp_empty;
+    endgroup
+
+    function new();
+        fifo_cg = new();
+    endfunction
+
+    function void sample(
+        logic f, logic e, logic w, logic r
+    );
+        full  = f;
+        empty = e;
+        wr_en = w;
+        rd_en = r;
+        fifo_cg.sample();
+    endfunction
+endclass
+
+// Main Testbench
+module fifo_tb;
+
+    logic        clk, rst;
+    logic        wr_en, rd_en;
+    logic [7:0]  din;
+    logic [7:0]  dout;
+    logic        full, empty;
+
+    // Scoreboard queue
+    logic [7:0] scoreboard[$];
+    int pass_count = 0;
+    int fail_count = 0;
+
+    // Instantiate DUT
+    fifo_sync #(.DEPTH(8), .WIDTH(8)) dut (
+        .clk   (clk),
+        .rst   (rst),
+        .wr_en (wr_en),
+        .rd_en (rd_en),
+        .din   (din),
+        .dout  (dout),
+        .full  (full),
+        .empty (empty)
+    );
+
+    // SVA Assertions
+    // Assert: no write when full
+    property no_write_when_full;
+        @(posedge clk) (wr_en && full) |=> (dout == $past(dout));
+    endproperty
+
+    // Assert: no read when empty
+    property no_read_when_empty;
+        @(posedge clk) disable iff (rst)
+        (rd_en && empty) |=> (dout == $past(dout));
+    endproperty
+
+    assert_no_write_full:  assert property (no_write_when_full)
+        else $error("ASSERTION FAILED: Write attempted when FIFO full");
+
+    assert_no_read_empty:  assert property (no_read_when_empty)
+        else $error("ASSERTION FAILED: Read attempted when FIFO empty");
+
+    // Clock
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    // Coverage instance
+    fifo_coverage cov = new();
+
+    // Transaction instance
+    fifo_transaction tr = new();
+
+    // Write task
+    task write_fifo(input [7:0] data);
+        @(posedge clk);
+        wr_en = 1; rd_en = 0; din = data;
+        if (!full) scoreboard.push_back(data);
+        @(posedge clk);
+        wr_en = 0;
+    endtask
+
+    // Read task with scoreboard check
+    task read_fifo();
+        logic [7:0] expected;
+        @(posedge clk);
+        rd_en = 1; wr_en = 0;
+        @(posedge clk);
+        rd_en = 0;
+        if (scoreboard.size() > 0) begin
+            expected = scoreboard.pop_front();
+            @(posedge clk);
+            if (dout === expected) begin
+                $display("PASS: Read %0d | Expected %0d", dout, expected);
+                pass_count++;
+            end else begin
+                $display("FAIL: Read %0d | Expected %0d", dout, expected);
+                fail_count++;
+            end
+        end
+    endtask
+
+    // Main Test
+    initial begin
+        // Reset
+        rst = 1; wr_en = 0; rd_en = 0; din = 0;
+        repeat(2) @(posedge clk);
+        rst = 0;
+
+        $display("=== FIFO Constrained Random Testbench ===\n");
+
+        // Phase 1: Directed Tests
+        $display("-- Phase 1: Directed Tests --");
+        repeat(8) write_fifo($urandom_range(0,255));
+        $display("Full flag: %b (Expected: 1)", full);
+        repeat(8) read_fifo();
+        $display("Empty flag: %b (Expected: 1)", empty);
+
+        // Phase 2: Constrained Random Tests
+        $display("\n-- Phase 2: Constrained Random Tests --");
+        repeat(50) begin
+            if (!tr.randomize())
+                $display("Randomization failed");
+            // Sample coverage
+            cov.sample(full, empty, tr.wr_en, tr.rd_en);
+            if (tr.wr_en && !full)
+                write_fifo(tr.din);
+            else if (tr.rd_en && !empty)
+                read_fifo();
+            @(posedge clk);
+        end
+
+        // Phase 3: Corner Cases
+        $display("\n-- Phase 3: Corner Case Tests --");
+
+        // Fill FIFO completely
+        repeat(8) write_fifo($urandom_range(0,255));
+        $display("Write when Full test | Full=%b", full);
+        write_fifo(8'hFF); // should be ignored
+
+        // Empty FIFO completely
+        repeat(8) read_fifo();
+        $display("Read when Empty test | Empty=%b", empty);
+        read_fifo(); // should be ignored
+
+        // Phase 4: Coverage Report
+        $display("\n-- Phase 4: Results --");
+        $display("Total PASS: %0d", pass_count);
+        $display("Total FAIL: %0d", fail_count);
+        $display("Functional Coverage: %.1f%%",
+                 cov.fifo_cg.get_coverage());
+
+        $display("\n=== Testbench Complete ===");
+        $finish;
+    end
+
+    // Waveform dump
+    initial begin
+        $dumpfile("fifo_random_dump.vcd");
+        $dumpvars(0, fifo_tb);
+    end
+
+endmodule
