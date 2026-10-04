@@ -71,7 +71,7 @@ All defined coverage bins were exercised successfully.
 
 ## Waveform
 
-[FIFO Random Waveform](https://github.com/sashwanthr/fifo-sv-constrained-random-verification/blob/main/waveform_random.png)
+[FIFO Random Waveform]([https://github.com/sashwanthr/fifo-sv-constrained-random-verification/blob/main/waveform_random.png](https://github.com/sashwanthr/fifo-sv-constrained-random-verification/blob/main/waveform.png))
 
 ## File Structure
 
